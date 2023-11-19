@@ -25,7 +25,7 @@
         "keep_all_videos": false,
         "video_skip": 5,
         "rollout": {
-            "enabled": false,
+            "enabled": true,
             "n": 10,
             "horizon": 1600,
             "rate": 10,
@@ -34,21 +34,24 @@
         }
     },
     "train": {
-        "data": "/Users/vaibhav/work/robomimicV2/mimicgen_environments/mimicgen_envs/../datasets/core/coffee_d0.hdf5",
-        "output_dir": "../trained_models_mimicplay",
+        "data": "/srv/rl2-lab/flash7/vsaxena33/work/robomimicV2/mimicgen_environments/datasets/core/coffee_d0.hdf5",
+        "output_dir": "/srv/rl2-lab/flash7/vsaxena33/work/imitate-behavior/bilevel-manip/trained_models_mimicplay",
         "num_data_workers": 2,
         "hdf5_cache_mode": "low_dim",
         "hdf5_use_swmr": true,
         "hdf5_normalize_obs": false,
         "hdf5_load_next_obs": false,
         "hdf5_filter_key": null,
-        "seq_length": 10,
+        "seq_length": 1,
         "dataset_keys": [
             "actions",
             "rewards",
             "dones"
         ],
-        "goal_mode": "last",
+        "action_keys": [
+            "actions"
+        ],
+        "goal_mode": null,
         "cuda": true,
         "batch_size": 32,
         "num_epochs": 3000,
@@ -139,7 +142,7 @@
         },
         "highlevel": {
             "enabled": true,
-            "ac_dim": 70,
+            "ac_dim": 7,
             "latent_plan_dim": 400
         },
         "lowlevel": {
@@ -181,9 +184,7 @@
             },
             "goal": {
                 "low_dim": [],
-                "rgb": [
-                    "agentview_image"
-                ],
+                "rgb": [],
                 "depth": [],
                 "scan": []
             }

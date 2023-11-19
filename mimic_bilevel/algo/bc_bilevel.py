@@ -11,11 +11,12 @@ import torch.nn as nn
 import torchvision
 import torch.distributions as D
 
-from robomimic.algo.bc import BC_RNN
-# import robomimic.models.policy_nets as PolicyNets
-import mimicplay.models.policy_nets as PolicyNets
+from robomimic.algo.bc import BC_RNN, BC
+import robomimic.models.policy_nets as PolicyNets
+import mimicplay.models.policy_nets as PolicyNetsMimicPlay
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.tensor_utils as TensorUtils
+from robomimic.models.obs_nets import MIMO_Transformer
 # import robomimic.utils.geometry as geometry
 from robomimic.algo import register_algo_factory_func
 
@@ -52,7 +53,7 @@ class Highlevel_GMM_pretrain_mimicplay(Highlevel_GMM_pretrain):
         self.ac_dim = self.algo_config.highlevel.ac_dim
 
         self.nets = nn.ModuleDict()
-        self.nets["policy"] = PolicyNets.GMMActorNetwork(
+        self.nets["policy"] = PolicyNetsMimicPlay.GMMActorNetwork(
             obs_shapes=self.obs_shapes,
             goal_shapes=self.goal_shapes,
             ac_dim=self.ac_dim,
@@ -84,7 +85,6 @@ class Highlevel_GMM_pretrain_mimicplay(Highlevel_GMM_pretrain):
         input_batch = dict()
         input_batch["obs"] = {k: batch["obs"][k][:, 0, :] for k in batch["obs"]} # only keep first obs
         input_batch["goal_obs"] = batch.get("goal_obs", None)
-        assert input_batch["goal_obs"] is not None
         input_batch["actions"] = batch["actions"].view([batch["actions"].shape[0], -1]) # merge time and ac dims
         assert input_batch["actions"].shape[-1] == self.ac_dim
 
@@ -165,6 +165,9 @@ class Highlevel_GMM_pretrain_mimicplay(Highlevel_GMM_pretrain):
         return predictions
 
 
+# class InverseDynamics(BC):
+
+
 class BC_Bilevel(BC_RNN):
     def _create_networks(self):
         """
@@ -178,6 +181,8 @@ class BC_Bilevel(BC_RNN):
         # self.nets["decoder"] = PolicyNets.Decoder(**decoder_kwargs) #TODO decoder
 
         ### TODO RSSM style - unconditioned dist over entire trajectory
+
+        self.nets["policy"] = PolicyNets.GMMActorNetwork()
 
         self.nets = self.nets.float().to(self.device)
 
@@ -204,9 +209,15 @@ class BC_Bilevel(BC_RNN):
         # TODO add to logs
         return posterior
 
-    def _compute_loss(self):
+    def _compute_loss(self, batch):
+        
+
+        inputs = batch["obs"]
         # Encode input obs and goal into a latent
         # Compute KL_div(posterior||prior)
+        z = self.nets["posterior"](inputs)
+
+
 
         # Decode all obs and actions
         # Compute NLL loss
