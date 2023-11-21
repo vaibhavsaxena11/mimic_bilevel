@@ -1,13 +1,13 @@
 """
-Config for BC algorithm.
+Config for Inverse Dynamics algorithms.
 """
 
 from robomimic.config.base_config import BaseConfig
 from robomimic.config import BCConfig
 
 
-class MimicBilevelConfig(BCConfig):
-    ALGO_NAME = "mimic_bilevel"
+class InverseDynamicsConfig(BCConfig):
+    ALGO_NAME = "invdyna"
 
     def algo_config(self):
         """
@@ -17,7 +17,7 @@ class MimicBilevelConfig(BCConfig):
         training and test-time behavior should be populated here.
         """
 
-        super(MimicBilevelConfig, self).algo_config() # populating rest of the BC config params
+        super(InverseDynamicsConfig, self).algo_config() # populating rest of the BC config params
 
         # optimization parameters
         self.algo.optim_params.policy.learning_rate.initial = 1e-4      # policy learning rate
@@ -39,31 +39,3 @@ class MimicBilevelConfig(BCConfig):
         self.algo.rnn.open_loop = False     # if True, action predictions are only based on a single observation (not sequence)
         self.algo.rnn.kwargs.bidirectional = False            # rnn kwargs
         self.algo.rnn.kwargs.do_not_lock_keys()
-
-        # BC_Bilevel settings
-        self.algo.bc_bilevel.enabled = False
-
-
-        # MimicPlay settings
-        self.algo.highlevel.enabled = None
-        self.algo.highlevel.ac_dim = None
-        self.algo.highlevel.latent_plan_dim = None
-        # 
-        self.algo.lowlevel.enabled = None
-        self.algo.lowlevel.feat_dim = None
-        self.algo.lowlevel.n_layer = None
-        self.algo.lowlevel.n_head = None
-        self.algo.lowlevel.block_size = None
-        self.algo.lowlevel.gmm_modes = None
-        self.algo.lowlevel.action_dim = None
-        self.algo.lowlevel.proprio_dim = None
-        self.algo.lowlevel.spatial_softmax_num_kp = None
-        self.algo.lowlevel.gmm_min_std = None
-        self.algo.lowlevel.dropout = None
-        self.algo.lowlevel.trained_highlevel_planner = None
-        self.algo.lowlevel.eval_goal_img_window = None
-        self.algo.lowlevel.eval_max_goal_img_iter = None
-        # 
-        self.algo.playdata.enabled = None
-        self.algo.playdata.goal_image_range = None
-        self.algo.playdata.eval_goal_gap = None

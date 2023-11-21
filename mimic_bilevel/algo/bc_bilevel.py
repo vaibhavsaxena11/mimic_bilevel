@@ -25,7 +25,7 @@ from mimicplay.algo import Highlevel_GMM_pretrain
 @register_algo_factory_func("mimic_bilevel")
 def algo_config_to_class(algo_config):
     """
-    Maps algo config to the MimicPlay algo class to instantiate, along with additional algo kwargs.
+    Maps algo config to the algo class to instantiate, along with additional algo kwargs.
 
     Args:
         algo_config (Config instance): algo config
@@ -165,15 +165,11 @@ class Highlevel_GMM_pretrain_mimicplay(Highlevel_GMM_pretrain):
         return predictions
 
 
-# class InverseDynamics(BC):
-
-
 class BC_Bilevel(BC_RNN):
     def _create_networks(self):
         """
         Creates networks and places them into @self.nets.
         """
-        self.robot = self.algo_config.implicit.robot
         self.nets = nn.ModuleDict()
 
         # ### LMP style - goal-conditioned output trajectory

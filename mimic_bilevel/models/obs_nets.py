@@ -12,10 +12,309 @@ import torch.distributions as D
 from robomimic.utils.python_utils import extract_class_init_kwargs_from_dict
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
-from robomimic.models.base_nets import Module, Sequential, MLP, RNN_Base, ResNet18Conv, SpatialSoftmax, \
-    FeatureAggregator
+from robomimic.models.base_nets import Module, Sequential, MLP, RNN_Base, ResNet18Conv, SpatialSoftmax, FeatureAggregator
+from robomimic.models.obs_nets import MIMO_MLP, RNN_MIMO_MLP, ObservationDecoder, ObservationGroupEncoder
 from robomimic.models.obs_core import VisualCore, Randomizer
 from robomimic.models.transformers import PositionalEncoding, GPT_Backbone
+
+
+class MultiModalityObservationDecoder(ObservationDecoder):
+
+    def _create_layers(self):
+        self.nets = nn.ModuleDict()
+        for k in self.obs_shapes:
+            mod = ObsUtils.OBS_KEYS_TO_MODALITIES[k]
+            # TODO add more modalities as needed
+            if mod == "rgb":
+                # TODO use deconv image decoder
+                layer_out_dim = int(np.prod(self.obs_shapes[k]))
+                self.nets[k] = nn.Sequential(
+                    nn.Linear(self.input_feat_dim, layer_out_dim),
+                    nn.Unflatten(-1, self.obs_shapes[k])
+                )
+            else:
+                layer_out_dim = int(np.prod(self.obs_shapes[k]))
+                self.nets[k] = nn.Linear(self.input_feat_dim, layer_out_dim)
+
+
+class RNN_MIMO_MultiMod(Module):
+    """
+    Structure: [encoder(multi mod) -> rnn -> mlp -> decoder(multi mod)]
+    """
+    def __init__(
+        self,
+        input_obs_group_shapes,
+        output_shapes,
+        mlp_layer_dims,
+        rnn_hidden_dim,
+        rnn_num_layers,
+        rnn_type="LSTM",  # [LSTM, GRU]
+        rnn_kwargs=None,
+        mlp_activation=nn.ReLU,
+        mlp_layer_func=nn.Linear,
+        per_step=False, # TODO(VS) remove support for per_step as it should always be False
+        encoder_kwargs=None,
+    ):
+        """
+        Args:
+            input_obs_group_shapes (OrderedDict): a dictionary of dictionaries.
+                Each key in this dictionary should specify an observation group, and
+                the value should be an OrderedDict that maps modalities to
+                expected shapes.
+
+            output_shapes (OrderedDict): a dictionary that maps modality to
+                expected shapes for outputs.
+
+            rnn_hidden_dim (int): RNN hidden dimension
+
+            rnn_num_layers (int): number of RNN layers
+
+            rnn_type (str): [LSTM, GRU]
+
+            rnn_kwargs (dict): kwargs for the rnn model
+
+            per_step (bool): if True, apply the MLP and observation decoder into @output_shapes
+                at every step of the RNN. Otherwise, apply them to the final hidden state of the 
+                RNN.
+
+            encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied. Otherwise, should
+                be nested dictionary containing relevant per-modality information for encoder networks.
+                Should be of form:
+
+                obs_modality1: dict
+                    feature_dimension: int
+                    core_class: str
+                    core_kwargs: dict
+                        ...
+                        ...
+                    obs_randomizer_class: str
+                    obs_randomizer_kwargs: dict
+                        ...
+                        ...
+                obs_modality2: dict
+                    ...
+        """
+        # super(RNN_MIMO_Invdyna, self).__init__(*args, **kwargs)
+        # self.nets["decoder"] = ImageDecoder(
+        #     decode_shapes=self.output_shapes,
+        #     input_feat_dim=rnn_output_dim,
+        # )
+
+        assert not per_step, "per_step should be false as we need intermediate outputs at all timesteps"
+
+        super(RNN_MIMO_MultiMod, self).__init__()
+        assert isinstance(input_obs_group_shapes, OrderedDict)
+        assert np.all([isinstance(input_obs_group_shapes[k], OrderedDict) for k in input_obs_group_shapes])
+        assert isinstance(output_shapes, OrderedDict)
+        self.input_obs_group_shapes = input_obs_group_shapes
+        self.output_shapes = output_shapes
+        self.per_step = per_step
+
+        # separating action from state output shapes
+        # action_keys = ["actions"] # TODO get this from config.train.action_keys
+        # self.obs_output_shapes = dict([(k,v) for k, v in self.output_shapes.items() if k not in action_keys])
+        # self.action_output_shapes = dict([(k,v) for k, v in self.output_shapes.items() if k in action_keys])
+        # assert set(self.action_output_shapes.keys()).issubset(set(action_keys)) # TODO remove after testing
+
+        self.nets = nn.ModuleDict()
+
+        # Encoder for all observation groups.
+        self.nets["encoder"] = ObservationGroupEncoder(
+            observation_group_shapes=input_obs_group_shapes,
+            encoder_kwargs=encoder_kwargs,
+        )
+
+        # flat encoder output dimension
+        rnn_input_dim = self.nets["encoder"].output_shape()[0]
+
+        # bidirectional RNNs mean that the output of RNN will be twice the hidden dimension
+        rnn_is_bidirectional = rnn_kwargs.get("bidirectional", False)
+        num_directions = int(rnn_is_bidirectional) + 1 # 2 if bidirectional, 1 otherwise
+        rnn_output_dim = num_directions * rnn_hidden_dim
+        self.rnn_output_dim = rnn_output_dim
+
+        per_step_net = None
+        # NOTE(VS) per_step is True by default in the code
+        self._has_mlp = (len(mlp_layer_dims) > 0)
+        if self._has_mlp:
+            self.nets["mlp"] = MLP(
+                input_dim=rnn_output_dim,
+                output_dim=mlp_layer_dims[-1],
+                layer_dims=mlp_layer_dims[:-1],
+                output_activation=mlp_activation,
+                layer_func=mlp_layer_func
+            )
+            self.nets["obs_decoder"] = MultiModalityObservationDecoder(
+                # decode_shapes=self.obs_output_shapes,
+                decode_shapes=self.output_shapes,
+                input_feat_dim=mlp_layer_dims[-1],
+            )
+            if self.per_step:
+                per_step_net = Sequential(self.nets["mlp"], self.nets["obs_decoder"]) # TODO(VS) remove
+        else:
+            self.nets["obs_decoder"] = MultiModalityObservationDecoder(
+                # decode_shapes=self.obs_output_shapes,
+                decode_shapes=self.output_shapes,
+                input_feat_dim=rnn_output_dim,
+            )
+            if self.per_step:
+                per_step_net = self.nets["obs_decoder"] # TODO(VS) remove
+
+        # self.nets["action_decoder"] = MultiModalityObservationDecoder(
+        #     decode_shapes=self.action_output_shapes,
+        #     input_feat_dim=2*rnn_output_dim,
+        # )
+
+        # core network
+        self.nets["rnn"] = RNN_Base(
+            input_dim=rnn_input_dim,
+            rnn_hidden_dim=rnn_hidden_dim,
+            rnn_num_layers=rnn_num_layers,
+            rnn_type=rnn_type,
+            per_step_net=per_step_net, # TODO(VS) remove
+            rnn_kwargs=rnn_kwargs
+        )
+
+    def get_rnn_init_state(self, batch_size, device):
+        """
+        Get a default RNN state (zeros)
+
+        Args:
+            batch_size (int): batch size dimension
+
+            device: device the hidden state should be sent to.
+
+        Returns:
+            hidden_state (torch.Tensor or tuple): returns hidden state tensor or tuple of hidden state tensors
+                depending on the RNN type
+        """
+        # NOTE(VS) unchanged
+        return self.nets["rnn"].get_rnn_init_state(batch_size, device=device)
+
+    def output_shape(self, input_shape):
+        """
+        Returns output shape for this module, which is a dictionary instead
+        of a list since outputs are dictionaries.
+
+        Args:
+            input_shape (dict): dictionary of dictionaries, where each top-level key
+                corresponds to an observation group, and the low-level dictionaries
+                specify the shape for each modality in an observation dictionary
+        """
+        # NOTE(VS) unchanged
+
+        # infers temporal dimension from input shape
+        obs_group = list(self.input_obs_group_shapes.keys())[0]
+        mod = list(self.input_obs_group_shapes[obs_group].keys())[0]
+        T = input_shape[obs_group][mod][0]
+        TensorUtils.assert_size_at_dim(input_shape, size=T, dim=0, 
+                msg="RNN_MIMO_MLP: input_shape inconsistent in temporal dimension")
+        # returns a dictionary instead of list since outputs are dictionaries
+        return { k : [T] + list(self.output_shapes[k]) for k in self.output_shapes }
+
+    def forward(self, rnn_init_state=None, return_state=False, **inputs):
+        """
+        Args:
+            inputs (dict): a dictionary of dictionaries with one dictionary per
+                observation group. Each observation group's dictionary should map
+                modality to torch.Tensor batches. Should be consistent with
+                @self.input_obs_group_shapes. First two leading dimensions should
+                be batch and time [B, T, ...] for each tensor.
+
+            rnn_init_state: rnn hidden state, initialize to zero state if set to None
+
+            return_state (bool): whether to return hidden state
+
+        Returns:
+            outputs (dict): dictionary of output torch.Tensors, that corresponds
+                to @self.output_shapes. Leading dimensions will be batch and time [B, T, ...]
+                for each tensor.
+
+            rnn_state (torch.Tensor or tuple): return the new rnn state (if @return_state)
+        """
+        for obs_group in self.input_obs_group_shapes:
+            for k in self.input_obs_group_shapes[obs_group]:
+                # first two dimensions should be [B, T] for inputs
+                assert inputs[obs_group][k].ndim - 2 == len(self.input_obs_group_shapes[obs_group][k])
+
+        # use encoder to extract flat rnn inputs
+        rnn_inputs = TensorUtils.time_distributed(inputs, self.nets["encoder"], inputs_as_kwargs=True)
+        assert rnn_inputs.ndim == 3  # [B, T, D]
+        if self.per_step: # TODO(VS) remove as we need to return rnn_outputs and not just decoded ones
+            return self.nets["rnn"].forward(inputs=rnn_inputs, rnn_init_state=rnn_init_state, return_state=return_state)
+        
+        rnn_outputs = self.nets["rnn"].forward(inputs=rnn_inputs, rnn_init_state=rnn_init_state, return_state=return_state)
+        if return_state:
+            rnn_outputs, rnn_state = rnn_outputs
+        assert rnn_outputs.ndim == 3 # [B, T, D]
+
+        # # apply MLP + decoder to last RNN output
+        # if self._has_mlp:
+        #     outputs = self.nets["obs_decoder"](self.nets["mlp"](outputs[:, -1]))
+        # else:
+        #     outputs = self.nets["obs_decoder"](outputs[:, -1])
+
+        # apply MLP + decoder to all rnn outputs
+        if self._has_mlp:
+            outputs = TensorUtils.time_distributed(rnn_outputs, Sequential(self.nets["mlp"], self.nets["obs_decoder"]))
+        else:
+            outputs = TensorUtils.time_distributed(rnn_outputs, self.nets["obs_decoder"])
+
+        if return_state:
+            return outputs, rnn_outputs, rnn_state
+        return outputs, rnn_outputs
+
+    def forward_step(self, rnn_state, **inputs):
+        """
+        Unroll network over a single timestep.
+
+        Args:
+            inputs (dict): expects same modalities as @self.input_shapes, with
+                additional batch dimension (but NOT time), since this is a 
+                single time step.
+
+            rnn_state (torch.Tensor): rnn hidden state
+
+        Returns:
+            outputs (dict): dictionary of output torch.Tensors, that corresponds
+                to @self.output_shapes. Does not contain time dimension.
+
+            rnn_state: return the new rnn state
+        """
+        # ensure that the only extra dimension is batch dim, not temporal dim 
+        assert np.all([inputs[k].ndim - 1 == len(self.input_shapes[k]) for k in self.input_shapes])
+
+        inputs = TensorUtils.to_sequence(inputs)
+        outputs, rnn_state = self.forward(
+            inputs, 
+            rnn_init_state=rnn_state,
+            return_state=True,
+        )
+        # NOTE(VS) if per_step==True, outputs at all timesteps are passed through decoder
+        # NOTE(VS) otherwise, only the last output has been passed through decoder -- and time dim removed
+        if self.per_step:
+            # if outputs are not per-step, the time dimension is already reduced
+            outputs = outputs[:, 0]
+        return outputs, rnn_state
+
+    def _to_string(self):
+        """
+        Subclasses should override this method to print out info about network / policy.
+        """
+        # NOTE(VS) unchanged
+        return ''
+
+    def __repr__(self):
+        """Pretty print network."""
+        # NOTE(VS) unchanged
+        header = '{}'.format(str(self.__class__.__name__))
+        msg = ''
+        indent = ' ' * 4
+        msg += textwrap.indent("\n" + self._to_string(), indent)
+        msg += textwrap.indent("\n\nencoder={}".format(self.nets["encoder"]), indent)
+        msg += textwrap.indent("\n\nrnn={}".format(self.nets["rnn"]), indent)
+        msg = header + '(' + msg + '\n)'
+        return msg
 
 
 class MIMO_Transformer(Module):
