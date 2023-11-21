@@ -25,7 +25,7 @@
         "keep_all_videos": false,
         "video_skip": 5,
         "rollout": {
-            "enabled": true,
+            "enabled": false,
             "n": 20,
             "horizon": 1600,
             "rate": 10,
