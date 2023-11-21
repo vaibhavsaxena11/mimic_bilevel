@@ -54,6 +54,8 @@ class InverseDynamics(BC_RNN):
             **BaseNets.rnn_args_from_config(self.algo_config.rnn),
         )
 
+        self.nets = self.nets.float().to(self.device)
+
     def process_batch_for_training(self, batch):
         """
         Processes input batch from a data loader to filter out
