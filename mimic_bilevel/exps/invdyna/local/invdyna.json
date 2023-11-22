@@ -25,10 +25,10 @@
         "keep_all_videos": false,
         "video_skip": 5,
         "rollout": {
-            "enabled": false,
+            "enabled": true,
             "n": 20,
             "horizon": 1600,
-            "rate": 10,
+            "rate": 20,
             "warmstart": 0,
             "terminate_on_success": true
         }

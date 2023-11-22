@@ -77,7 +77,8 @@ class InverseDynamics(BC_RNN):
             assert input_batch["obs"][k].shape[1] >= 2, input_batch["obs"][k].shape
         input_batch["goal_obs"] = batch.get("goal_obs", None)
         assert input_batch["goal_obs"] is None, input_batch["goal_obs"].keys() # don't need goals
-        input_batch["actions"] = batch["actions"][:, :-1, :] # keeping all but last action
+        input_batch["actions"] = batch["actions"]
+        # input_batch["actions"] = batch["actions"][:, :-1, :] # keeping all but last action
         assert input_batch["actions"].shape[-1] == self.ac_dim, self.ac_dim
 
         # we move to device first before float conversion because image observation modalities will be uint8 -
@@ -97,6 +98,7 @@ class InverseDynamics(BC_RNN):
             predictions (dict): dictionary containing network outputs
         """
         predictions = OrderedDict()
+        # TODO don't pass the obs at last t; subsequently, no need to ignore last timestep of predictions["recons"] in _compute_losses()
         outputs = self.nets["policy"](obs_dict=batch["obs"], goal_dict=batch["goal_obs"])
         predictions["actions"], predictions["recons"] = outputs
         return predictions
@@ -115,7 +117,7 @@ class InverseDynamics(BC_RNN):
             losses (dict): dictionary of losses computed over the batch
         """
         losses = OrderedDict()
-        a_target = batch["actions"]
+        a_target = batch["actions"][:, :-1]
         actions = predictions["actions"]
         losses["l2_loss"] = nn.MSELoss()(actions, a_target)
         losses["l1_loss"] = nn.SmoothL1Loss()(actions, a_target)
@@ -130,7 +132,7 @@ class InverseDynamics(BC_RNN):
         action_loss = sum(action_losses)
         losses["action_loss"] = action_loss
 
-        recon_losses = [nn.MSELoss()(predictions["recons"][k], batch["obs"][k]) for k in batch["obs"]]
+        recon_losses = [nn.MSELoss()(predictions["recons"][k][:, :-1], batch["obs"][k][:, 1:]) for k in batch["obs"]]
         losses["recon_loss"] = sum(recon_losses)
 
         return losses
@@ -171,7 +173,18 @@ class InverseDynamics(BC_RNN):
             log["Recon_Loss"] = info["losses"]["recon_loss"].item()
         return log
 
-    # def get_action(self, obs_dict, goal_dict=None):
-    #     #  Call dynamics to get next state
-    #     # probably not needed to reimplement as policy class takes care and only outputs action
-    #     pass
+    def get_action(self, obs_dict, goal_dict=None):
+        #  Call dynamics to get next state
+        # probably not needed to reimplement as policy class takes care and only outputs action
+
+        assert not self.nets.training
+
+        obs = copy.deepcopy(obs_dict)
+        _, next_obs, _ = self.nets["policy"].forward_step(obs, goal_dict=goal_dict, predict_action=False)
+        obs = TensorUtils.unsqueeze(obs, 1)
+        next_obs = TensorUtils.unsqueeze(next_obs, 1)
+        for k in next_obs:
+            obs[k] = torch.cat([obs[k], next_obs[k]], 1)
+        action, _ = self.nets["policy"](obs, goal_dict=goal_dict, predict_action=True)
+
+        return action[:, 0]

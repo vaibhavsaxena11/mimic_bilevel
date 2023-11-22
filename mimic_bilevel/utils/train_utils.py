@@ -523,6 +523,7 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
     Returns:
         step_log_all (dict): dictionary of logged training metrics averaged across all batches
     """
+    return {}
     epoch_timestamp = time.time()
     if validate:
         model.set_eval()

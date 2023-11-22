@@ -152,7 +152,7 @@ class RNNActorInvdyna(RNN_MIMO_MultiMod):
                 msg="RNNActorInvdyna: input_shape inconsistent in temporal dimension")
         return [T, self.ac_dim]
 
-    def forward(self, obs_dict, goal_dict=None, rnn_init_state=None, return_state=False):
+    def forward(self, obs_dict, goal_dict=None, rnn_init_state=None, return_state=False, predict_action=True):
         """
         Forward a sequence of inputs through the RNN and the per-step network.
 
@@ -182,21 +182,22 @@ class RNNActorInvdyna(RNN_MIMO_MultiMod):
             recons, rnn_outputs = outputs
             rnn_state = None
 
-        assert rnn_outputs.ndim == 3, rnn_outputs.shape # [B, T, D]
-        # use rnn_outputs to reverse-predict actions # TODO use rnn-outputs instead of rnn-rnn_outputs? matters for LSTM but not GRU
-        next_rnn_outputs = torch.roll(rnn_outputs, shifts=-1, dims=1)
-        # TODO stop grad on rnn rnn_outputs?
-        actions = TensorUtils.time_distributed(torch.cat([rnn_outputs[:, :-1], next_rnn_outputs[:, :-1]], -1), self.nets["action_decoder"])
-        
-        # apply tanh squashing to ensure actions are in [-1, 1]
-        actions = torch.tanh(actions["action"])
+        actions = None
+        if predict_action:
+            # use rnn_outputs to reverse-predict actions # TODO use rnn-outputs instead of rnn-rnn_outputs? matters for LSTM but not GRU
+            assert rnn_outputs.ndim == 3, rnn_outputs.shape # [B, T, D]
+            next_rnn_outputs = torch.roll(rnn_outputs, shifts=-1, dims=1)
+            # TODO stop grad on rnn rnn_outputs?
+            actions = TensorUtils.time_distributed(torch.cat([rnn_outputs[:, :-1], next_rnn_outputs[:, :-1]], -1), self.nets["action_decoder"])
+            # apply tanh squashing to ensure actions are in [-1, 1]
+            actions = torch.tanh(actions["action"])
 
         if return_state:
             return actions, recons, rnn_state
         else:
             return actions, recons
 
-    def forward_step(self, obs_dict, goal_dict=None, rnn_state=None):
+    def forward_step(self, obs_dict, goal_dict=None, rnn_state=None, predict_action=True):
         """
         Unroll RNN over single timestep to get actions.
 
@@ -211,9 +212,11 @@ class RNNActorInvdyna(RNN_MIMO_MultiMod):
             state: updated rnn state
         """
         obs_dict = TensorUtils.to_sequence(obs_dict)
-        action, state = self.forward(
-            obs_dict, goal_dict, rnn_init_state=rnn_state, return_state=True)
-        return action[:, 0], state
+        action, obs, state = self.forward(
+            obs_dict, goal_dict, rnn_init_state=rnn_state, return_state=True, predict_action=predict_action)
+        if predict_action:
+            return action[:, 0], TensorUtils.index_at_time(obs, 0), state
+        return None, TensorUtils.index_at_time(obs, 0), state
 
     def _to_string(self):
         """Info to pretty print."""
