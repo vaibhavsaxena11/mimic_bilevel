@@ -34,8 +34,8 @@
         }
     },
     "train": {
-        "data": "/Users/vaibhav/work/robomimicV2/mimicgen_environments/mimicgen_envs/../datasets/core/coffee_d0.hdf5",
-        "output_dir": "/Users/vaibhav/work/imitate-behavior/mimic_bilevel/trained_models_mimicplay",
+        "data": "/srv/rl2-lab/flash7/vsaxena33/work/robomimicV2/LIBERO/datasets/libero_90.hdf5",
+        "output_dir": "/srv/rl2-lab/flash7/vsaxena33/work/imitate-behavior/mimic_bilevel/trained_models_mimicplay/libero/",
         "num_data_workers": 2,
         "hdf5_cache_mode": "low_dim",
         "hdf5_use_swmr": true,
