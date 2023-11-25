@@ -25,7 +25,7 @@
         "keep_all_videos": false,
         "video_skip": 5,
         "rollout": {
-            "enabled": true,
+            "enabled": false,
             "n": 10,
             "horizon": 1600,
             "rate": 20,
@@ -174,10 +174,10 @@
         "modalities": {
             "obs": {
                 "low_dim": [
-                    "robot0_eef_pos"
+                    "ee_pos"
                 ],
                 "rgb": [
-                    "agentview_image"
+                    "agentview_rgb"
                 ],
                 "depth": [],
                 "scan": []
