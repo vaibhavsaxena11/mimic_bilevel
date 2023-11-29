@@ -2,13 +2,6 @@
 A convenience script to playback random demonstrations from
 a set of demonstrations stored in a hdf5 file.
 
-Arguments:
-    --folder (str): Path to demonstrations
-    --use-actions (optional): If this flag is provided, the actions are played back
-        through the MuJoCo simulator, instead of loading the simulator states
-        one by one.
-    --visualize-gripper (optional): If set, will visualize the gripper site
-
 Example:
     $ python scripts/playback_libero_dataset.py \
         --data-path /Users/vaibhav/work/robomimicV2/LIBERO/datasets/libero_10/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5 \
@@ -146,22 +139,7 @@ if __name__ == "__main__":
     env_kwargs = env_args["env_kwargs"]
     env_kwargs["bddl_file_name"] = str(pathlib.Path(libero.__path__[0]).parent / f["data"].attrs["bddl_file_name"])
 
-    # env_kwargs["render"] = True
     env_kwargs["use_camera_obs"] = True
-
-    
-    # env = robosuite.make(
-    #     env_name=env_name,
-    #     # **env_info,
-    #     # has_renderer=True,
-    #     # has_offscreen_renderer=False,
-    #     # render=True,
-    #     # ignore_done=True,
-    #     # use_camera_obs=False,
-    #     # reward_shaping=True,
-    #     # control_freq=20,
-    #     **env_kwargs
-    # )
 
     env = EnvUtils.create_env(
         env_type=EB.EnvType.ROBOSUITE_TYPE,
@@ -196,15 +174,8 @@ if __name__ == "__main__":
         # read the model xml, using the metadata stored in the attribute for this episode
         model_xml = f["data/{}".format(ep)].attrs["model_file"]
 
-        # env.reset()
-        # # xml = env.edit_model_xml(model_xml)
-        # # env.reset_from_xml_string(xml)
-        # env.env.sim.reset()
-        # env.viewer.set_camera(0)
-
         model_xml = postprocess_model_xml(model_xml, {})
         env.env.reset_from_xml_string(model_xml)
-        # env.reset_to({"model": model_xml})
 
         # load the flattened mujoco states
         states = f["data/{}/states".format(ep)][()]
@@ -212,7 +183,6 @@ if __name__ == "__main__":
         if args.use_actions:
 
             # load the initial state
-            # import pdb; pdb.set_trace()
             env.env.sim.set_state_from_flattened(states[0])
             env.env.sim.forward()
 
@@ -231,7 +201,6 @@ if __name__ == "__main__":
                         for cam_name in ["agentview"]:
                             video_img.append(env.render(mode="rgb_array", height=512, width=512, camera_name=cam_name))
                         video_img = np.concatenate(video_img, axis=1) # concatenate horizontally
-                        # import pdb; pdb.set_trace()
                         video_writer.append_data(video_img)
                     video_count += 1
 
