@@ -133,3 +133,6 @@ dmypy.json
 
 # Trained models
 trained_models*/
+
+# Playback videos
+playback*/
