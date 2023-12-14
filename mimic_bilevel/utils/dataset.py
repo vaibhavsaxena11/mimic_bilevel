@@ -105,7 +105,7 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         self.goal_mode = goal_mode
         if self.goal_mode is not None:
-            assert self.goal_mode in ["last", "next_obs"]
+            assert "last" in self.goal_mode or self.goal_mode in ["last", "next_obs"]
         # if not self.load_next_obs:
         #     assert self.goal_mode != "last"  # we use last next_obs as goal
         # if not self.load_next_obs:
@@ -433,8 +433,14 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         # determine goal index
         goal_index = None
+        num_goal_frames = 1
+        goal_key = None
         if self.goal_mode == "last":
             goal_index = end_index_in_demo - 1
+            goal_key = "obs"
+        elif "last" in self.goal_mode:
+            goal_index = end_index_in_demo - 1
+            num_goal_frames = int(self.goal_mode.split("_")[1])
             goal_key = "obs"
         elif self.goal_mode == "next_obs":
             # goal_index = index_in_demo
@@ -467,7 +473,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 index_in_demo=goal_index,
                 keys=self.obs_keys,
                 num_frames_to_stack=0,
-                seq_length=1,
+                seq_length=num_goal_frames, #1,
                 prefix=goal_key, ## "next_obs"
             )
             meta["goal_obs"] = {k: goal[k][0] for k in goal}  # remove sequence dimension for goal
