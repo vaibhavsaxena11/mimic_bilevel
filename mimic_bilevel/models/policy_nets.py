@@ -221,3 +221,77 @@ class RNNActorInvdyna(RNN_MIMO_MultiMod):
     def _to_string(self):
         """Info to pretty print."""
         return "action_dim={}".format(self.ac_dim)
+
+
+class DiffusionActorInvdyna(Diffusion_MIMO_MultiMod):
+    def __init__(
+        self,
+        obs_shapes,
+        ac_dim,
+        encoder_mlp_dims,
+        denoiser_mlp_hidden_dims,
+        num_timesteps,
+        timestep_dim,
+        goal_shapes=None,
+        encoder_kwargs=None,
+    ):
+        self.ac_dim = ac_dim
+
+        assert isinstance(obs_shapes, OrderedDict)
+        self.obs_shapes = obs_shapes
+        self.latent_dim = encoder_mlp_dims[-1]
+        action_shapes = OrderedDict({"action": [self.ac_dim,]})
+
+        # set up different observation groups for @Diffusion_MIMO_MultiMod
+        observation_group_shapes = OrderedDict()
+        observation_group_shapes["obs"] = OrderedDict(self.obs_shapes)
+
+        self._is_goal_conditioned = False
+        if goal_shapes is not None and len(goal_shapes) > 0:
+            assert isinstance(goal_shapes, OrderedDict)
+            self._is_goal_conditioned = True
+            self.goal_shapes = OrderedDict(goal_shapes)
+            observation_group_shapes["goal"] = OrderedDict(self.goal_shapes)
+        else:
+            self.goal_shapes = OrderedDict()
+
+        super(DiffusionActorInvdyna, self).__init__(
+            input_obs_group_shapes=observation_group_shapes,
+            output_shapes=self.obs_shapes, # obs recon
+            encoder_mlp_dims=encoder_mlp_dims,
+            denoiser_mlp_hidden_dims=denoiser_mlp_hidden_dims,
+            num_timesteps=num_timesteps,
+            timestep_dim=timestep_dim # TODO(VS) use this to encode timestep in super class
+        )
+
+        self.nets["action_decoder"] = MultiModalityObservationDecoder(
+            decode_shapes=action_shapes,
+            input_feat_dim=2*self.latent_dim,
+        )
+    
+    def output_shape(self, input_shape):
+        # note: @input_shape should be dictionary (key: mod)
+        # infers temporal dimension from input shape
+        mod = list(self.obs_shapes.keys())[0]
+        T = input_shape[mod][0]
+        TensorUtils.assert_size_at_dim(input_shape, size=T, dim=0, 
+                msg="DiffusionActorInvdyna: input_shape inconsistent in temporal dimension")
+
+        out_shape = super().output_shape(input_shape)
+        out_shape.update(OrderedDict(action=(T-1, self.ac_dim,)))
+        return out_shape
+
+    def forward(self, obs_dict, goal_dict=None, timesteps=None, predict_action=True):
+        latents, (noise, noise_pred), recons = super(DiffusionActorInvdyna, self).forward(obs=obs_dict, goal=goal_dict, timesteps=timesteps)
+
+        actions = None
+        if predict_action:
+            next_latents = torch.roll(latents, shifts=-1, dims=1)
+            actions = TensorUtils.time_distributed(torch.cat([latents[:, :-1], next_latents[:, :-1]], -1), self.nets["action_decoder"])
+            actions = torch.tanh(actions["action"])
+
+        return actions, (noise, noise_pred), recons
+
+    def _to_string(self):
+        """Info to pretty print."""
+        return "action_dim={}".format(self.ac_dim)

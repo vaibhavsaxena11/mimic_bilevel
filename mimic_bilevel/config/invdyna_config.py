@@ -39,3 +39,10 @@ class InverseDynamicsConfig(BCConfig):
         self.algo.rnn.open_loop = False     # if True, action predictions are only based on a single observation (not sequence)
         self.algo.rnn.kwargs.bidirectional = False            # rnn kwargs
         self.algo.rnn.kwargs.do_not_lock_keys()
+
+        # Latent diffusion policy settings
+        self.algo.latent_diffusion.enabled = False
+        self.algo.latent_diffusion.encoder_mlp_dims = [400,400,256]
+        self.algo.latent_diffusion.denoiser_mlp_hidden_dims = [400,400]
+        self.algo.latent_diffusion.num_timesteps = 100
+        self.algo.latent_diffusion.timestep_dim = 256

@@ -37,6 +37,11 @@ def algo_config_to_class(algo_config):
         algo_kwargs (dict): dictionary of additional kwargs to pass to algorithm
     """
 
+    latent_diffusion_enabled = ("latent_diffusion" in algo_config and algo_config.latent_diffusion.enabled)
+
+    if latent_diffusion_enabled:
+        return DiffusionInverseDynamics, {}
+
     return InverseDynamics, {}
 
 class InverseDynamics(BC_RNN):
@@ -188,3 +193,126 @@ class InverseDynamics(BC_RNN):
         action, _ = self.nets["policy"](obs, goal_dict=goal_dict, predict_action=True)
 
         return action[:, 0]
+
+
+class DiffusionInverseDynamics(InverseDynamics):
+    def _create_networks(self):
+        self.nets = nn.ModuleDict()
+
+        self.nets["policy"] = PolicyNets_Bilevel.DiffusionActorInvdyna(
+            obs_shapes=self.obs_shapes,
+            ac_dim=self.ac_dim,
+            encoder_mlp_dims=self.algo_config.latent_diffusion.encoder_mlp_dims,
+            denoiser_mlp_hidden_dims=self.algo_config.latent_diffusion.denoiser_mlp_hidden_dims,
+            num_timesteps=self.algo_config.latent_diffusion.num_timesteps,
+            timestep_dim=self.algo_config.latent_diffusion.timestep_dim,
+            goal_shapes=self.goal_shapes,
+            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
+        )
+
+        self.nets = self.nets.float().to(self.device)
+
+    def _forward_training(self, batch):
+        """
+        Internal helper function for BC algo class. Compute forward pass
+        and return network outputs in @predictions dict.
+
+        Args:
+            batch (dict): dictionary with torch.Tensors sampled
+                from a data loader and filtered by @process_batch_for_training
+
+        Returns:
+            predictions (dict): dictionary containing network outputs
+        """
+        predictions = OrderedDict()
+        outputs = self.nets["policy"](obs_dict=batch["obs"], goal_dict=batch["goal_obs"])
+        predictions["actions"], predictions["latent_diffusion"], predictions["recons"] = outputs
+        return predictions
+
+    def _compute_losses(self, predictions, batch):
+        losses = OrderedDict()
+        a_target = batch["actions"][:, :-1]
+        actions = predictions["actions"]
+        losses["l2_loss"] = nn.MSELoss()(actions, a_target)
+        losses["l1_loss"] = nn.SmoothL1Loss()(actions, a_target)
+        # cosine direction loss on eef delta position
+        losses["cos_loss"] = LossUtils.cosine_loss(actions[..., :3], a_target[..., :3])
+
+        action_losses = [
+            self.algo_config.loss.l2_weight * losses["l2_loss"],
+            self.algo_config.loss.l1_weight * losses["l1_loss"],
+            self.algo_config.loss.cos_weight * losses["cos_loss"],
+        ]
+        action_loss = sum(action_losses)
+        losses["action_loss"] = action_loss
+
+        # TODO test
+        recon_losses = [nn.MSELoss()(predictions["recons"][k][:, :-1], batch["obs"][k][:, 1:]) for k in self.obs_shapes]
+        losses["recon_loss"] = sum(recon_losses)
+
+        # TODO test
+        diffusion_loss = nn.MSELoss()(predictions["latent_diffusion"][0], predictions["latent_diffusion"][1])
+        losses["diffusion_loss"] = diffusion_loss
+
+        return losses
+
+    def _train_step(self, losses):
+        """
+        Internal helper function for BC algo class. Perform backpropagation on the
+        loss tensors in @losses to update networks.
+
+        Args:
+            losses (dict): dictionary of losses computed over the batch, from @_compute_losses
+        """
+        # NOTE: DONE
+        # gradient step
+        info = OrderedDict()
+        policy_grad_norms = TorchUtils.backprop_for_loss(
+            net=self.nets["policy"],
+            optim=self.optimizers["policy"],
+            loss=losses["action_loss"]+losses["diffusion_loss"]+losses["recon_loss"],
+            max_grad_norm=self.global_config.train.max_grad_norm,
+        )
+        info["policy_grad_norms"] = policy_grad_norms
+        return info
+
+    def log_info(self, info):
+        """
+        Process info dictionary from @train_on_batch to summarize
+        information to pass to tensorboard for logging.
+
+        Args:
+            info (dict): dictionary of info
+
+        Returns:
+            loss_log (dict): name -> summary statistic
+        """
+        # NOTE: DONE
+        log = super(InverseDynamics, self).log_info(info)
+        log["Loss"] = info["losses"]["action_loss"].item() + info["losses"]["diffusion_loss"].item() + info["losses"]["recon_loss"].item()
+        if "recon_loss" in info["losses"]:
+            log["Recon_Loss"] = info["losses"]["recon_loss"].item()
+        if "diffusion_loss" in info["losses"]:
+            log["Diffusion_Loss"] = info["losses"]["diffusion_loss"].item()
+        return log
+
+    def get_action(self, obs_dict, goal_dict=None):
+        """
+        conditioned-generation (infilling) followed by inverse-dynamics
+        """
+        mod = ObsUtils.OBS_MODALITIES_TO_KEYS["rgb"][0]
+        T = obs_dict[mod].shape[1]
+
+        mask = torch.zeros([T,]).to(self.device)
+        mask[0] = 1
+        mask[-1] = 1
+        mask_idxs = [0, -1]
+        recons = copy.deepcopy(obs_dict)
+        for t in reversed(range(self.algo_config.latent_diffusion.num_timesteps)):
+            actions, _, recons = self.nets["policy"](obs_dict, goal_dict, timesteps=[t,])
+            for k in recons:
+                # recons[k] = obs_dict[k]*mask + recons[k]*(1-mask)
+                for t in range(len(mask)):
+                    recons[k][:,t] = obs_dict[k][:,t]*mask[t] + recons[k][:,t]*(1-mask[t])
+
+        return actions

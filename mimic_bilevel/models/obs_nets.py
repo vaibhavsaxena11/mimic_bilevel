@@ -36,6 +36,15 @@ class MultiModalityObservationDecoder(ObservationDecoder):
                 layer_out_dim = int(np.prod(self.obs_shapes[k]))
                 self.nets[k] = nn.Linear(self.input_feat_dim, layer_out_dim)
 
+    def forward(self, feats):
+        """
+        Predict each modality from input features, and reshape to each modality's shape.
+        """
+        output = {}
+        for k in self.obs_shapes:
+            output[k] = self.nets[k](feats)
+        return output
+
 
 class RNN_MIMO_MultiMod(Module):
     """
@@ -559,3 +568,145 @@ class MIMO_Transformer(Module):
         msg += textwrap.indent("\n\ndecoder={}".format(self.nets["decoder"]), indent)
         msg = header + '(' + msg + '\n)'
         return msg
+
+
+################################
+#### Latent Diffusion Model ####
+################################
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        assert x.shape[-1] == 1, x.shape
+        device = x.device
+        half_dim = self.dim // 2
+        emb = np.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x * emb
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+class Diffusion_MIMO_MultiMod(Module):
+    def __init__(
+        self,
+        input_obs_group_shapes,
+        output_shapes,
+        encoder_mlp_dims,
+        denoiser_mlp_hidden_dims,
+        num_timesteps,
+        timestep_dim,
+        encoder_kwargs=None
+    ):
+        super(Diffusion_MIMO_MultiMod, self).__init__()
+
+        assert isinstance(input_obs_group_shapes, OrderedDict)
+        assert np.all([isinstance(input_obs_group_shapes[k], OrderedDict) for k in input_obs_group_shapes])
+        assert isinstance(output_shapes, OrderedDict)
+        self.input_obs_group_shapes = input_obs_group_shapes
+        self.output_shapes = output_shapes
+        self.num_timesteps = num_timesteps
+
+        self.nets = nn.ModuleDict()
+
+        # Encoder for all observation groups.
+        self.nets["encoder"] = ObservationGroupEncoder(
+            observation_group_shapes=input_obs_group_shapes,
+            encoder_kwargs=encoder_kwargs,
+        )
+        self.nets["encoder_mlp"] = MLP(
+            input_dim=self.nets["encoder"].output_shape()[0],
+            output_dim=encoder_mlp_dims[-1],
+            layer_dims=encoder_mlp_dims[:-1],
+            output_activation=nn.Identity,
+            layer_func=nn.Linear
+        )
+
+        # flat encoder output dimension
+        # self.latent_dim = self.nets["encoder"].output_shape()[0]
+        self.latent_dim = encoder_mlp_dims[-1]
+        
+        # Latent denoiser
+        assert timestep_dim % 2 == 0
+        self.timestep_encoder = SinusoidalPosEmb(timestep_dim)
+        self.nets["denoiser"] = MLP(
+            input_dim=self.latent_dim+timestep_dim, # TODO(VS) also input timestep_dim
+            output_dim=self.latent_dim,
+            layer_dims=denoiser_mlp_hidden_dims,
+            output_activation=nn.Identity,
+            layer_func=nn.Linear
+        )
+
+        self.nets["obs_decoder"] = MultiModalityObservationDecoder(
+            decode_shapes=self.output_shapes,
+            input_feat_dim=self.latent_dim,
+        )
+
+    def output_shape(self, input_shape):
+        """
+        Returns output shape for this module, which is a dictionary instead
+        of a list since outputs are dictionaries.
+
+        Args:
+            input_shape (dict): dictionary of dictionaries, where each top-level key
+                corresponds to an observation group, and the low-level dictionaries
+                specify the shape for each modality in an observation dictionary
+        """
+        return OrderedDict(noise=self.latent_dim, noise_pred=self.latent_dim, **input_shape)
+
+    def forward(self, timesteps=None, **inputs):
+        """
+        Args:
+            timesteps: TODO
+            inputs (dict): a dictionary of dictionaries with one dictionary per
+                observation group. Each observation group's dictionary should map
+                modality to torch.Tensor batches. Should be consistent with
+                @self.input_obs_group_shapes. First two leading dimensions should
+                be batch and time [B, T, ...] for each tensor.
+
+        Returns:
+            latents: TODO
+            (noise, noise_pred): TODO
+            decoded_obs: TODO
+        """
+        # input a dict of observations
+        # output: latent from the encoder
+        # output: decoded (reconstructed) observations for all timesteps
+
+        for obs_group in self.input_obs_group_shapes:
+            for k in self.input_obs_group_shapes[obs_group]:
+                # first two dimensions should be [B, T] for inputs
+                assert inputs[obs_group][k].ndim - 2 == len(self.input_obs_group_shapes[obs_group][k])
+
+        # use encoder to extract flat inputs
+        feats = TensorUtils.time_distributed(inputs, self.nets["encoder"], inputs_as_kwargs=True)
+        latents = self.nets["encoder_mlp"](feats)
+        assert latents.ndim == 3  # [B, T, D]
+
+        # (latent diffusion model) iteratively add noise to latents (only on T's not masked) (TODO)
+        # and denoise to obtain new latents
+        # subsequently, decode latents to generate observations and return
+
+        if timesteps == None: # train to denoise all timesteps
+            # timestep_wrong_actions = torch.rand([batch_size, num_wrong_exs, 1]).to(self.device)
+            # timestep_wrong_actions = torch.tensor(np.random.choice(ts, [batch_size, num_wrong_exs, 1]).astype(np.float32)).to(self.device)
+            B, T = latents.shape[:2]
+            ts = np.array([t for t in range(self.num_timesteps)])
+            timesteps = torch.tensor(np.random.choice(ts, [B, T, 1]).astype(np.float32))
+        else:
+            timesteps = torch.tensor(timesteps)
+            assert timesteps.ndim == 1 and timesteps.shape[0] == 1
+            timesteps = torch.unsqueeze(torch.unsqueeze(timesteps, 0), 0)
+            B, T = latents.shape[:2]
+            timesteps = torch.tile(timesteps, (B,T,1))
+        assert timesteps.ndim == 3  # [B, T, D]
+        beta = 0.002 + (0.1 * timesteps / self.num_timesteps)
+        noise = torch.randn(list(latents.shape))
+        noisy_latents = latents + (beta**0.5)*noise
+        noise_pred = self.nets["denoiser"](torch.cat([noisy_latents, self.timestep_encoder(timesteps)], -1))
+
+        decoded_obs = self.nets["obs_decoder"](latents)
+
+        return latents, (noise, noise_pred), decoded_obs
