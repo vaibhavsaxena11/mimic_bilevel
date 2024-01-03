@@ -55,12 +55,13 @@ def train(config, device):
     np.random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
 
-    torch.set_num_threads(2)
+    # set num workers
+    torch.set_num_threads(1)
 
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
-    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
+    log_dir, ckpt_dir, video_dir, vis_dir = TrainUtils.get_exp_dir(config)
 
     if config.experiment.logging.terminal_output_to_txt:
         # log stdout and stderr to a text file
@@ -71,20 +72,35 @@ def train(config, device):
     # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
     ObsUtils.initialize_obs_utils_with_config(config)
 
-    # make sure the dataset exists
-    dataset_path = os.path.expanduser(config.train.data)
-    if not os.path.exists(dataset_path):
-        raise Exception("Dataset at provided path {} not found!".format(dataset_path))
+    # extract the metadata and shape metadata across all datasets
+    env_meta_list = []
+    shape_meta_list = []
+    for dataset_cfg in config.train.data:
+        dataset_path = os.path.expanduser(dataset_cfg["path"])
+        ds_format = config.train.data_format
+        if not os.path.exists(dataset_path):
+            raise Exception("Dataset at provided path {} not found!".format(dataset_path))
 
-    # load basic metadata from training file
-    print("\n============= Loaded Environment Metadata =============")
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=config.train.data)
-    shape_meta = FileUtils.get_shape_metadata_from_dataset(
-        dataset_path=config.train.data,
-        action_keys=config.train.action_keys,
-        all_obs_keys=config.all_obs_keys,
-        verbose=True
-    )
+        # load basic metadata from training file
+        print("\n============= Loaded Environment Metadata =============")
+        env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=dataset_path, ds_format=ds_format)
+
+        # populate language instruction for env in env_meta
+        env_meta["lang"] = dataset_cfg.get("lang", "dummy")
+
+        # update env meta if applicable
+        from robomimic.utils.script_utils import deep_update
+        deep_update(env_meta, config.experiment.env_meta_update_dict)
+        env_meta_list.append(env_meta)
+
+        shape_meta = FileUtils.get_shape_metadata_from_dataset(
+            dataset_config=dataset_cfg,
+            action_keys=config.train.action_keys,
+            all_obs_keys=config.all_obs_keys,
+            ds_format=ds_format,
+            verbose=True
+        )
+        shape_meta_list.append(shape_meta)
 
     if config.experiment.env is not None:
         env_meta["env_name"] = config.experiment.env
@@ -94,23 +110,49 @@ def train(config, device):
     envs = OrderedDict()
     if config.experiment.rollout.enabled:
         # create environments for validation runs
-        env_names = [env_meta["env_name"]]
+        # env_names = [env_meta["env_name"]]
 
-        if config.experiment.additional_envs is not None:
-            for name in config.experiment.additional_envs:
-                env_names.append(name)
+        # # disable this feature for now
+        # if config.experiment.additional_envs is not None:
+        #     raise NotImplementedError
+        #     for name in config.experiment.additional_envs:
+        #         env_names.append(name)
 
-        for env_name in env_names:
-            env = EnvUtils.create_env_from_metadata(
-                env_meta=env_meta,
-                env_name=env_name, 
-                render=False, 
-                render_offscreen=config.experiment.render_video,
-                use_image_obs=shape_meta["use_images"], 
-            )
-            env = EnvUtils.wrap_env_from_config(env, config=config) # apply environment warpper, if applicable
-            envs[env.name] = env
-            print(envs[env.name])
+        for (dataset_i, dataset_cfg) in enumerate(config.train.data):
+            do_eval = dataset_cfg.get("eval", True)
+            if do_eval is not True:
+                continue
+            env_meta = env_meta_list[dataset_i]
+            shape_meta = shape_meta_list[dataset_i]
+            env_name = env_meta["env_name"]
+            
+            def create_env(env_i=0):
+                env_kwargs = dict(
+                    env_meta=env_meta,
+                    env_name=env_name,
+                    render=False,
+                    render_offscreen=config.experiment.render_video,
+                    use_image_obs=shape_meta["use_images"],
+                    # seed=config.train.seed * 1000 + env_i # TODO: add seeding across environments
+                )
+                env = EnvUtils.create_env_from_metadata(**env_kwargs)
+                # handle environment wrappers
+                env = EnvUtils.wrap_env_from_config(env, config=config)  # apply environment warpper, if applicable
+
+                return env
+
+            if config.experiment.rollout.batched:
+                from tianshou.env import SubprocVectorEnv
+                env_fns = [lambda env_i=i: create_env(env_i) for i in range(config.experiment.rollout.num_batch_envs)]
+                env = SubprocVectorEnv(env_fns)
+                env_name = env.get_env_attr(key="name", id=0)[0]
+            else:
+                env = create_env()
+                env_name = env.name
+            
+            env_key = os.path.splitext(os.path.basename(dataset_cfg['path']))[0]
+            envs[env_key] = env
+            print(env)
 
     print("")
 
@@ -124,14 +166,22 @@ def train(config, device):
     model = algo_factory(
         algo_name=config.algo_name,
         config=config,
-        obs_key_shapes=shape_meta["all_shapes"],
-        ac_dim=shape_meta["ac_dim"],
+        obs_key_shapes=shape_meta_list[0]["all_shapes"],
+        ac_dim=shape_meta_list[0]["ac_dim"],
         device=device,
     )
     
     # save the config as a json file
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
         json.dump(config, outfile, indent=4)
+
+    # if checkpoint is specified, load in model weights
+    ckpt_path = config.experiment.ckpt_path
+    if ckpt_path is not None:
+        print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
+        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
+        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        model.deserialize(ckpt_dict["model"])
 
     print("\n============= Model Summary =============")
     print(model)  # print model summary
@@ -153,6 +203,9 @@ def train(config, device):
     obs_normalization_stats = None
     if config.train.hdf5_normalize_obs:
         obs_normalization_stats = trainset.get_obs_normalization_stats()
+
+    # maybe retreve statistics for normalizing actions
+    action_normalization_stats = trainset.get_action_normalization_stats()
 
     # initialize data loaders
     train_loader = DataLoader(
@@ -259,9 +312,12 @@ def train(config, device):
         video_paths = None
         rollout_check = (epoch % config.experiment.rollout.rate == 0) or (should_save_ckpt and ckpt_reason == "time")
         if config.experiment.rollout.enabled and (epoch > config.experiment.rollout.warmstart) and rollout_check:
-
             # wrap model as a RolloutPolicy to prepare for rollouts
-            rollout_model = RolloutPolicy(model, obs_normalization_stats=obs_normalization_stats)
+            rollout_model = RolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+            )
 
             num_episodes = config.experiment.rollout.n
             all_rollout_logs, video_paths = TrainUtils.rollout_with_stats(
@@ -306,14 +362,43 @@ def train(config, device):
             if updated_stats["ckpt_reason"] is not None:
                 ckpt_reason = updated_stats["ckpt_reason"]
 
-        # Only keep saved videos if the ckpt should be saved (but not because of validation score)
-        should_save_video = (should_save_ckpt and (ckpt_reason != "valid")) or config.experiment.keep_all_videos
-        if video_paths is not None and not should_save_video:
-            for env_name in video_paths:
-                os.remove(video_paths[env_name])
+        # check if we need to save model MSE
+        should_save_mse = False
+        if config.experiment.mse.enabled:
+            if config.experiment.mse.every_n_epochs is not None and epoch % config.experiment.mse.every_n_epochs == 0:
+                should_save_mse = True
+            if config.experiment.mse.on_save_ckpt and should_save_ckpt:
+                should_save_mse = True
+        if should_save_mse:
+            print("Computing MSE ...")
+            if config.experiment.mse.visualize:
+                save_vis_dir = os.path.join(vis_dir, epoch_ckpt_name)
+            else:
+                save_vis_dir = None
+            mse_log, vis_log = model.compute_mse_visualize(
+                trainset,
+                validset,
+                num_samples=config.experiment.mse.num_samples,
+                savedir=save_vis_dir,
+            )    
+            for k, v in mse_log.items():
+                data_logger.record("{}".format(k), v, epoch)
+            
+            for k, v in vis_log.items():
+                data_logger.record("{}".format(k), v, epoch, data_type='image')
+
+
+            print("MSE Log Epoch {}".format(epoch))
+            print(json.dumps(mse_log, sort_keys=True, indent=4))
+        
+        # # Only keep saved videos if the ckpt should be saved (but not because of validation score)
+        # should_save_video = (should_save_ckpt and (ckpt_reason != "valid")) or config.experiment.keep_all_videos
+        # if video_paths is not None and not should_save_video:
+        #     for env_name in video_paths:
+        #         os.remove(video_paths[env_name])
 
         # Save model checkpoints based on conditions (success rate, validation loss, etc)
-        if should_save_ckpt:
+        if should_save_ckpt:    
             TrainUtils.save_model(
                 model=model,
                 config=config,
@@ -321,6 +406,7 @@ def train(config, device):
                 shape_meta=shape_meta,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
             )
 
         # Finally, log memory usage in MB
@@ -429,4 +515,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-

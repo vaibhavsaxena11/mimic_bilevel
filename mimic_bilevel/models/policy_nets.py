@@ -6,7 +6,7 @@ import torch.nn as nn
 from robomimic.models.base_nets import Module, Sequential, MLP
 from robomimic.models.obs_nets import MIMO_Transformer
 import robomimic.utils.tensor_utils as TensorUtils
-from mimic_bilevel.models.obs_nets import RNN_MIMO_MultiMod, MultiModalityObservationDecoder
+from mimic_bilevel.models.obs_nets import RNN_MIMO_MultiMod, MultiModalityObservationDecoder, Diffusion_MIMO_MultiMod
 
 # class LDM(MIMO_Transformer):
 #     def _create_networks(self):
