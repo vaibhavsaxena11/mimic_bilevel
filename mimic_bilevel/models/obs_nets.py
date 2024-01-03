@@ -694,9 +694,9 @@ class Diffusion_MIMO_MultiMod(Module):
             # timestep_wrong_actions = torch.tensor(np.random.choice(ts, [batch_size, num_wrong_exs, 1]).astype(np.float32)).to(self.device)
             B, T = latents.shape[:2]
             ts = np.array([t for t in range(self.num_timesteps)])
-            timesteps = torch.tensor(np.random.choice(ts, [B, T, 1]).astype(np.float32))
+            timesteps = torch.tensor(np.random.choice(ts, [B, T, 1]).astype(np.float32)).to(latents.device)
         else:
-            timesteps = torch.tensor(timesteps)
+            timesteps = torch.tensor(timesteps).to(latents.device)
             assert timesteps.ndim == 1 and timesteps.shape[0] == 1
             timesteps = torch.unsqueeze(torch.unsqueeze(timesteps, 0), 0)
             B, T = latents.shape[:2]
