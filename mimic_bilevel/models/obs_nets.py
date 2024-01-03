@@ -703,7 +703,7 @@ class Diffusion_MIMO_MultiMod(Module):
             timesteps = torch.tile(timesteps, (B,T,1))
         assert timesteps.ndim == 3  # [B, T, D]
         beta = 0.002 + (0.1 * timesteps / self.num_timesteps)
-        noise = torch.randn(list(latents.shape))
+        noise = torch.randn(list(latents.shape)).to(latents.device)
         noisy_latents = latents + (beta**0.5)*noise
         noise_pred = self.nets["denoiser"](torch.cat([noisy_latents, self.timestep_encoder(timesteps)], -1))
 
